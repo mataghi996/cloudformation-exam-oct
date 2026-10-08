@@ -1,0 +1,113 @@
+Parameters:
+  GlueScriptBucket:
+    Type: String
+    Description: S3 bucket containing glue-job.py
+
+Resources:
+
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+  Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: Policy
+      Roles:
+        - !Ref Role
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - glue:StartJobRun
+              - glue:GetJobRun
+              - glue:GetJobRuns
+              - glue:BatchStopJobRun
+              - states:StartExecution
+              - sqs:SendMessage
+              - sns:Publish
+              - s3:GetObject
+            Resource: '*'
+
+  Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: Queue
+
+  Topic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: Topic
+
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: GlueJob
+      Role: !GetAtt Role.Arn
+      Command:
+        Name: pythonshell
+        PythonVersion: '3.9'
+        ScriptLocation: !Sub 's3://${GlueScriptBucket}/glue-job.py'
+      MaxCapacity: 0.0625
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: Policy
+    Properties:
+      StateMachineName: StateMachine
+      RoleArn: !GetAtt Role.Arn
+      DefinitionString: !Sub |
+        {
+          "StartAt": "RunGlueJob",
+          "States": {
+            "RunGlueJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${GlueJob}"
+              },
+              "Next": "SendToSQS"
+            },
+            "SendToSQS": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sqs:sendMessage",
+              "Parameters": {
+                "QueueUrl": "${Queue}",
+                "MessageBody": "Glue job completed"
+              },
+              "Next": "SendToSNS"
+            },
+            "SendToSNS": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${Topic}",
+                "Message": "completed"
+              },
+              "End": true
+            }
+          }
+        }
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref StateMachine
+
+  QueueUrl:
+    Value: !Ref Queue
+
+  TopicArn:
+    Value: !Ref Topic
